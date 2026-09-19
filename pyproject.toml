@@ -1,0 +1,17 @@
+[project]
+name = "azure-cosmos-db-toolkit"
+version = "0.1.0"
+description = "LangChain tools for querying Azure Cosmos DB for NoSQL"
+readme = "README.md"
+authors = [
+    { name = "David Ojo", email = "conceptcodes@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = ["azure-cosmos>=4.9,<5", "langchain-core>=1,<2", "pydantic>=2,<3"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.12", "langchain>=1,<2"]
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
