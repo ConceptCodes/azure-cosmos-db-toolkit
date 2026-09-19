@@ -1,4 +1,5 @@
-"""Run with COSMOS_ENDPOINT, COSMOS_KEY, COSMOS_DATABASE, and CHAT_MODEL set.
+"""Run with COSMOS_ENDPOINT, COSMOS_KEY, COSMOS_DATABASE, COSMOS_PARTITION_KEY,
+and CHAT_MODEL set.
 
 Install langchain and the provider package for CHAT_MODEL first. Configure that
 provider's credentials separately. This example expects an orders container.
@@ -28,7 +29,7 @@ def main() -> None:
                 os.environ["COSMOS_DATABASE"],
                 include_containers=["orders"],
                 sample_documents=3,
-                allow_cross_partition_queries=True,
+                sample_partition_keys={"orders": os.environ["COSMOS_PARTITION_KEY"]},
             ),
             llm=model,
         )
@@ -38,7 +39,17 @@ def main() -> None:
             system_prompt=COSMOSDB_AGENT_SYSTEM_PROMPT,
         )
         result = agent.invoke(
-            {"messages": [{"role": "user", "content": "Show five recent orders."}]},
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Show five recent orders in partition "
+                            + os.environ["COSMOS_PARTITION_KEY"]
+                        ),
+                    }
+                ]
+            },
             config={"recursion_limit": 20},
         )
         print(result["messages"][-1].content)
