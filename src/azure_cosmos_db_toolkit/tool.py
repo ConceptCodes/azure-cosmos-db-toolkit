@@ -4,6 +4,7 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+from azure.core.exceptions import AzureError
 from azure.cosmos.exceptions import CosmosHttpResponseError
 from langchain_core.callbacks import (
     AsyncCallbackManagerForToolRun,
@@ -13,8 +14,10 @@ from langchain_core.language_models import BaseLanguageModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import BaseTool, ToolException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
+from ._errors import describe_cosmos_error
 from .database import CosmosDBDatabase
 from .prompt import COSMOSDB_QUERY_CHECKER
 
@@ -28,13 +31,15 @@ class BaseCosmosDBDatabaseTool(BaseTool):
 
     def _call(self, operation: Callable[..., Any], **kwargs: Any) -> str:
         try:
-            return json.dumps(operation(**kwargs), ensure_ascii=False)
+            return self.db.serialize_result(operation(**kwargs))
         except ValueError as exc:
             raise ToolException(str(exc)) from exc
         except CosmosHttpResponseError as exc:
+            raise ToolException(describe_cosmos_error(exc)) from exc
+        except (AzureError, TimeoutError) as exc:
             raise ToolException(
-                f"Cosmos DB request failed (HTTP {exc.status_code}). "
-                "Check query syntax, container access, and service availability."
+                "Cosmos DB SDK request failed or timed out. Retry later; if it persists, "
+                "ask the application owner to check connectivity and SDK timeouts."
             ) from exc
 
 
@@ -71,20 +76,60 @@ class InfoCosmosDBDatabaseTool(BaseCosmosDBDatabaseTool):
         return self._call(self.db.get_container_info, container=container)
 
 
+type JsonScalar = str | int | float | bool
+type PartitionValue = JsonScalar | list[JsonScalar]
+
+
 class QueryParameter(BaseModel):
     """A Cosmos SQL parameter, passed as data to the SDK."""
 
     name: str = Field(pattern=r"^@[A-Za-z_][A-Za-z0-9_]*$")
-    value: Any = Field(description="JSON parameter value.")
+    value: JsonScalar | SkipJsonSchema[None] = Field(
+        default=None,
+        description="String, number, or Boolean parameter value. Use value_json for complex values.",
+        json_schema_extra=lambda schema: schema.pop("default", None),
+    )
+    value_json: str = Field(
+        default="",
+        description='JSON-encoded array, object, or null, e.g. [1,2] or {"active":true}. Leave empty when using value.',
+    )
+
+    @model_validator(mode="after")
+    def validate_value(self) -> "QueryParameter":
+        if self.value_json:
+            if self.value is not None:
+                raise ValueError("Use either value or value_json, not both")
+            try:
+                json.loads(self.value_json, parse_constant=_reject_constant)
+            except (ValueError, RecursionError) as exc:
+                raise ValueError("value_json must contain valid JSON") from exc
+        return self
+
+    def as_sdk_parameter(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "value": json.loads(self.value_json) if self.value_json else self.value,
+        }
+
+
+def _reject_constant(value: str) -> None:
+    raise ValueError("Non-finite numbers are not JSON values")
 
 
 class _QueryInput(BaseModel):
     container: str = Field(min_length=1, description="Container to query.")
     query: str = Field(min_length=1, description="Cosmos SQL SELECT using @parameters.")
     parameters: list[QueryParameter] | None = None
-    # Keep int explicitly: Pydantic uses this union for runtime validation.
-    partition_key: str | int | float | bool | list[Any] | None = None
-    limit: int = Field(default=10, ge=1, description="Maximum rows to return.")
+    partition_key: PartitionValue | SkipJsonSchema[None] = Field(
+        default=None,
+        description="Partition value or ordered hierarchical key values. Omit for cross-partition queries.",
+        json_schema_extra=lambda schema: schema.pop("default", None),
+    )
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        description="Maximum rows; omitted uses the smaller of 10 and the configured maximum.",
+    )
 
 
 class QueryCosmosDBDatabaseTool(BaseCosmosDBDatabaseTool):
@@ -104,14 +149,16 @@ class QueryCosmosDBDatabaseTool(BaseCosmosDBDatabaseTool):
         container: str,
         query: str,
         parameters: list[QueryParameter] | None = None,
-        partition_key: str | int | float | bool | list[Any] | None = None,  # noqa: PYI041
-        limit: int = 10,
+        partition_key: PartitionValue | None = None,
+        limit: int | None = None,
     ) -> str:
         return self._call(
             self.db.query,
             container=container,
             query=query,
-            parameters=[p.model_dump() for p in parameters] if parameters else None,
+            parameters=[p.as_sdk_parameter() for p in parameters]
+            if parameters
+            else None,
             partition_key=partition_key,
             limit=limit,
         )
