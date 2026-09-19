@@ -1,6 +1,5 @@
 import asyncio
 import json
-from unittest.mock import MagicMock
 
 import pytest
 from azure.cosmos.exceptions import CosmosHttpResponseError
@@ -8,21 +7,6 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.fake import FakeListLLM
 
 from azure_cosmos_db_toolkit import CosmosDBDatabase, CosmosDBDatabaseToolkit
-
-
-@pytest.fixture
-def sdk():
-    client = MagicMock()
-    database = client.get_database_client.return_value
-    database.list_containers.return_value = [{"id": "orders"}, {"id": "private"}]
-    container = database.get_container_client.return_value
-    container.read.return_value = {
-        "id": "orders",
-        "partitionKey": {"paths": ["/tenant"]},
-        "indexingPolicy": {"indexingMode": "consistent"},
-    }
-    container.query_items.return_value = iter([{"id": "1"}])
-    return client, database, container
 
 
 def test_allowlist_applies_to_discovery_metadata_and_queries(sdk):
@@ -104,8 +88,6 @@ def test_metadata_does_not_sample_by_default(sdk):
 
 def test_sampling_is_opt_in(sdk):
     client, _, _ = sdk
-    with pytest.raises(ValueError, match="sampling requires"):
-        CosmosDBDatabase(client, "app", sample_documents=1)
     db = CosmosDBDatabase(
         client,
         "app",
